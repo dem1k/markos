@@ -1,5 +1,6 @@
-export type NodeKind = 'file' | 'folder' | 'game'
+export type NodeKind = 'file' | 'folder' | 'game' | 'app'
 export type GameId = 'worm' | 'tetris'
+export type AppId = 'browser'
 
 export interface FsNode {
   id: string
@@ -9,6 +10,7 @@ export interface FsNode {
   badge: string
   content: string
   game?: GameId
+  app?: AppId
   x: number
   y: number
 }
@@ -16,6 +18,8 @@ export interface FsNode {
 export interface DeskWindow {
   id: string
   nodeId: string
+  /** Folder currently shown inside explorer (navigates in-place). */
+  viewId?: string
   x: number
   y: number
   w: number
@@ -33,8 +37,15 @@ export interface DeskState {
   user: string | null
 }
 
-const STORAGE_KEY = 'markos.desktop'
+const STORAGE_KEY = 'markos.desktop.v2'
 const USER_KEY = 'markos.user'
+
+export const ID_MY_COMPUTER = 'my-computer'
+export const ID_DISK_C = 'disk-c'
+export const ID_MARKOS_SYS = 'markos-sys'
+export const ID_GAMES = 'games'
+/** @deprecated old id — migrated to ID_GAMES */
+export const ID_GAMED = 'gamed'
 
 export const STARTERS: { name: string; badge: string }[] = [
   { name: 'systembootup', badge: '.s' },
@@ -69,46 +80,118 @@ function placeAt(i: number): { x: number; y: number } {
   return { x: 24 + (i % cols) * 100, y: 24 + Math.floor(i / cols) * 110 }
 }
 
-function seedNodes(): FsNode[] {
-  const files = STARTERS.map((s, i) => ({
-    id: uid('s'),
-    parentId: null,
-    kind: 'file' as const,
-    name: s.name,
-    badge: s.badge,
-    content: '',
-    ...placeAt(i),
-  }))
-  const games = GAMES.map((g, i) => ({
-    id: uid('g'),
-    parentId: null,
-    kind: 'game' as const,
-    name: g.name,
-    badge: g.badge,
-    content: '',
-    game: g.game,
-    ...placeAt(STARTERS.length + i),
-  }))
-  return [...files, ...games]
+function folderNode(
+  id: string,
+  parentId: string | null,
+  name: string,
+  badge: string,
+  x: number,
+  y: number,
+): FsNode {
+  return { id, parentId, kind: 'folder', name, badge, content: '', x, y }
 }
 
-export function ensureGames(state: DeskState): void {
-  const names = new Set(state.nodes.map((n) => n.name))
-  let i = state.nodes.filter((n) => n.parentId === null).length
-  let changed = false
-  for (const g of GAMES) {
-    if (names.has(g.name)) continue
-    state.nodes.push({
+function seedNodes(): FsNode[] {
+  const nodes: FsNode[] = [
+    folderNode(ID_MY_COMPUTER, null, 'My Computer', 'PC', 24, 24),
+    folderNode(ID_DISK_C, ID_MY_COMPUTER, 'C:', 'C:', 16, 16),
+    folderNode(ID_MARKOS_SYS, ID_DISK_C, 'markos.sys', 'sys', 16, 16),
+    folderNode(ID_GAMES, ID_DISK_C, 'games', 'gam', 116, 16),
+  ]
+  STARTERS.forEach((s, i) => {
+    nodes.push({
+      id: uid('s'),
+      parentId: ID_MARKOS_SYS,
+      kind: 'file',
+      name: s.name,
+      badge: s.badge,
+      content: '',
+      ...placeAt(i),
+    })
+  })
+  GAMES.forEach((g, i) => {
+    nodes.push({
       id: uid('g'),
-      parentId: null,
+      parentId: ID_GAMES,
       kind: 'game',
       name: g.name,
       badge: g.badge,
       content: '',
       game: g.game,
-      ...placeAt(i++),
+      ...placeAt(i),
     })
+  })
+  return nodes
+}
+
+export function ensureLayout(state: DeskState): void {
+  let changed = false
+  const ensureFolder = (
+    id: string,
+    parentId: string | null,
+    name: string,
+    badge: string,
+    x: number,
+    y: number,
+  ) => {
+    let n = state.nodes.find((x) => x.id === id)
+    if (!n) {
+      n = folderNode(id, parentId, name, badge, x, y)
+      state.nodes.push(n)
+      changed = true
+    } else {
+      n.parentId = parentId
+      n.kind = 'folder'
+      n.name = name
+      n.badge = badge
+    }
+  }
+  ensureFolder(ID_MY_COMPUTER, null, 'My Computer', 'PC', 24, 24)
+  ensureFolder(ID_DISK_C, ID_MY_COMPUTER, 'C:', 'C:', 16, 16)
+  ensureFolder(ID_MARKOS_SYS, ID_DISK_C, 'markos.sys', 'sys', 16, 16)
+  ensureFolder(ID_GAMES, ID_DISK_C, 'games', 'gam', 116, 16)
+  const legacyGames = state.nodes.find((x) => x.id === ID_GAMED || x.name === 'gamed')
+  if (legacyGames && legacyGames.id !== ID_GAMES) {
+    state.nodes = state.nodes.filter((x) => x.id !== legacyGames.id)
     changed = true
+  }
+  for (const s of STARTERS) {
+    let n = state.nodes.find((x) => x.name === s.name && x.kind === 'file')
+    if (!n) {
+      state.nodes.push({
+        id: uid('s'),
+        parentId: ID_MARKOS_SYS,
+        kind: 'file',
+        name: s.name,
+        badge: s.badge,
+        content: '',
+        ...placeAt(state.nodes.filter((x) => x.parentId === ID_MARKOS_SYS).length),
+      })
+      changed = true
+    } else if (n.parentId !== ID_MARKOS_SYS) {
+      n.parentId = ID_MARKOS_SYS
+      changed = true
+    }
+  }
+  for (const g of GAMES) {
+    let n = state.nodes.find((x) => x.name === g.name && x.kind === 'game')
+    if (!n) {
+      state.nodes.push({
+        id: uid('g'),
+        parentId: ID_GAMES,
+        kind: 'game',
+        name: g.name,
+        badge: g.badge,
+        content: '',
+        game: g.game,
+        ...placeAt(state.nodes.filter((x) => x.parentId === ID_GAMES).length),
+      })
+      changed = true
+    } else if (n.parentId !== ID_GAMES) {
+      n.parentId = ID_GAMES
+      n.game = g.game
+      changed = true
+    }
   }
   if (changed) saveState(state)
 }
@@ -133,7 +216,7 @@ export function loadState(): DeskState {
     parsed.selectedId = null
     parsed.nextZ = parsed.nextZ || 1
     parsed.user = parsed.user || null
-    ensureGames(parsed)
+    ensureLayout(parsed)
     return parsed
   } catch {
     return createState()
@@ -235,55 +318,44 @@ export function setContent(state: DeskState, id: string, content: string): void 
 }
 
 export function restoreStarters(state: DeskState): void {
-  const byName = new Map(state.nodes.map((n) => [n.name, n]))
-  const system: FsNode[] = []
-  for (const s of STARTERS) {
-    let n = byName.get(s.name)
-    if (!n) {
-      n = {
-        id: uid('s'),
-        parentId: null,
-        kind: 'file',
-        name: s.name,
-        badge: s.badge,
-        content: '',
-        x: 0,
-        y: 0,
-      }
-      state.nodes.push(n)
-    }
-    n.parentId = null
-    n.kind = 'file'
-    n.badge = s.badge
-    system.push(n)
-  }
-  for (const g of GAMES) {
-    let n = byName.get(g.name)
-    if (!n) {
-      n = {
-        id: uid('g'),
-        parentId: null,
-        kind: 'game',
-        name: g.name,
-        badge: g.badge,
-        content: '',
-        game: g.game,
-        x: 0,
-        y: 0,
-      }
-      state.nodes.push(n)
-    }
-    n.parentId = null
-    n.kind = 'game'
-    n.badge = g.badge
-    n.game = g.game
-    system.push(n)
-  }
-  system.forEach((n, i) => {
+  ensureLayout(state)
+  const sysKids = state.nodes.filter((n) => n.parentId === ID_MARKOS_SYS && n.kind === 'file')
+  sysKids.forEach((n, i) => {
     const p = placeAt(i)
     n.x = p.x
     n.y = p.y
   })
+  const gameKids = state.nodes.filter((n) => n.parentId === ID_GAMES && n.kind === 'game')
+  gameKids.forEach((n, i) => {
+    const p = placeAt(i)
+    n.x = p.x
+    n.y = p.y
+  })
+  const mc = getNode(state, ID_MY_COMPUTER)
+  if (mc) {
+    mc.x = 24
+    mc.y = 24
+  }
+  saveState(state)
+}
+
+export function folderPath(state: DeskState, folderId: string): FsNode[] {
+  const path: FsNode[] = []
+  let cur: FsNode | undefined = getNode(state, folderId)
+  while (cur) {
+    path.unshift(cur)
+    cur = cur.parentId ? getNode(state, cur.parentId) : undefined
+  }
+  return path
+}
+
+export function navigateExplorer(state: DeskState, winId: string, folderId: string): void {
+  const w = state.windows.find((x) => x.id === winId)
+  const folder = getNode(state, folderId)
+  if (!w || !folder || folder.kind !== 'folder') return
+  w.viewId = folderId
+  w.minimized = false
+  w.z = state.nextZ++
   saveState(state)
 }
 
@@ -298,15 +370,18 @@ export function openWindow(state: DeskState, nodeId: string): DeskWindow {
   const node = getNode(state, nodeId)
   const size =
     node?.kind === 'folder'
-      ? { w: 360, h: 280 }
+      ? { w: 420, h: 320 }
       : node?.kind === 'game'
         ? node.game === 'tetris'
           ? { w: 220, h: 380 }
           : { w: 320, h: 320 }
-        : { w: 420, h: 300 }
+        : node?.kind === 'app'
+          ? { w: 480, h: 360 }
+          : { w: 420, h: 300 }
   const win: DeskWindow = {
     id: uid('w'),
     nodeId,
+    viewId: node?.kind === 'folder' ? nodeId : undefined,
     x: 80 + (state.windows.length % 6) * 24,
     y: 60 + (state.windows.length % 6) * 24,
     w: size.w,

@@ -10,12 +10,14 @@ export function deskIconHtml(
   selected: boolean,
   x: number,
   y: number,
-  kind: 'file' | 'folder' | 'game',
+  kind: 'file' | 'folder' | 'game' | 'app',
 ): string {
   const sel = selected ? ' selected' : ''
   const mark = kind === 'folder' ? badge || 'fld' : badge
+  const box =
+    kind === 'folder' ? 'folder-box' : kind === 'game' ? 'game-box' : kind === 'app' ? 'app-box' : ''
   return `<div class="desk-icon${sel}" data-id="${id}" data-kind="${kind}" style="left:${x}px;top:${y}px">
-    ${iconBoxHtml(mark, kind === 'folder' ? 'folder-box' : kind === 'game' ? 'game-box' : '')}
+    ${iconBoxHtml(mark, box)}
     <div class="desk-label">${escapeHtml(name)}</div>
   </div>`
 }

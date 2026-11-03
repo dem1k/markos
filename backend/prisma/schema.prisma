@@ -1,0 +1,81 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  displayName String @default("Guest")
+  ageBand   String   @default("kid")
+  createdAt DateTime @default(now())
+  progress  Progress?
+  activities Activity[]
+  events    LiveEvent[]
+  aiTurns   AiTurn[]
+}
+
+model Progress {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  packId        String   @default("day1")
+  currentNodeId String   @default("offline_start")
+  flagsJson     String   @default("{}")
+  vectorsJson   String   @default("{\"programming\":0,\"hacking_ethical\":0,\"security\":0}")
+  historyJson   String   @default("[]")
+  online        Boolean  @default(false)
+  networkId     String?
+  updatedAt     DateTime @updatedAt
+}
+
+model Activity {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  payloadJson String @default("{}")
+  createdAt DateTime @default(now())
+}
+
+model LiveEvent {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type        String
+  payloadJson String
+  delivered   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+}
+
+model AiTurn {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  purpose   String
+  prompt    String
+  response  String
+  createdAt DateTime @default(now())
+}
+
+model ScenarioNode {
+  id          String @id
+  packId      String
+  title       String
+  ageBandsJson String
+  payloadJson String
+  vectorDeltaJson String @default("{}")
+}
+
+model ScenarioEdge {
+  id         String @id
+  packId     String
+  fromNodeId String
+  toNodeId   String
+  choiceLabel String
+  whenJson   String @default("{}")
+}

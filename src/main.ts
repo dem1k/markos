@@ -4,6 +4,13 @@ import { deskIconHtml, escapeHtml } from './icons'
 import { mountWorm } from './games/worm'
 import { mountTetris } from './games/tetris'
 import type { GameHandle } from './games/worm'
+import day1 from './content/scenarios/day1.json'
+import type { ScenarioPack, ScenarioProgress, LiveEvent } from './scenario/types'
+import { applyActivity, loadProgress, currentHint } from './scenario/engine'
+import { networkTrayHtml, openNetworkWindow } from './scenario/network'
+import { applyLiveEvents } from './scenario/events'
+import { guestAuth, connectLive, postActivity, probeServerAlive } from './scenario/bridge'
+import { mountBrowser } from './apps/browser'
 import {
   type DeskState,
   type FsNode,
@@ -23,6 +30,8 @@ import {
   minimizeWindow,
   maximizeWindow,
   updateWindowPos,
+  folderPath,
+  navigateExplorer,
 } from './model'
 
 const app = document.querySelector<HTMLElement>('#app')!
@@ -33,10 +42,18 @@ let startMenuEl: HTMLElement | null = null
 let renamingId: string | null = null
 let clockTimer: number | null = null
 const gameHandles = new Map<string, GameHandle>()
+const browserHandles = new Map<string, { destroy: () => void; navigate: (u: string) => void }>()
+const scenarioPack = day1 as ScenarioPack
+let scenario: ScenarioProgress = loadProgress(scenarioPack)
+let liveSend: ((a: { type: string; networkId?: string }) => void) | null = null
+let authToken: string | null = null
+let pendingBrowserUrl: string | null = null
 
 function destroyGames(): void {
   for (const h of gameHandles.values()) h.destroy()
   gameHandles.clear()
+  for (const h of browserHandles.values()) h.destroy()
+  browserHandles.clear()
 }
 
 function topZ(): number {
@@ -69,6 +86,14 @@ function render(): void {
       state.user = name
       saveState(state)
       setPhase('desktop')
+      if (!scenario.online) {
+        setTimeout(() => {
+          showScenarioDialog(
+            'Network',
+            String(scenarioPack.nodes.find((n) => n.id === scenario.currentNodeId)?.payload?.hint || 'Connect to Wi-Fi.'),
+          )
+        }, 400)
+      }
     })
     return
   }
@@ -91,12 +116,14 @@ function renderDesktop(): void {
       ${state.windows
         .map((w) => {
           const n = getNode(state, w.nodeId)
+          const view = w.viewId ? getNode(state, w.viewId) : n
           const active = !w.minimized && w.z === maxZ ? ' active' : ''
-          return `<button type="button" class="task-btn${active}" data-win="${w.id}">${escapeHtml(n?.name ?? '?')}</button>`
+          return `<button type="button" class="task-btn${active}" data-win="${w.id}">${escapeHtml(view?.name ?? n?.name ?? '?')}</button>`
         })
         .join('')}
       </div>
       <div class="task-tray">
+        ${networkTrayHtml(scenario.online, scenario.networkId ? scenarioPack.networks.find((n) => n.id === scenario.networkId)?.ssid ?? null : null)}
         <span class="task-user">${escapeHtml(state.user ?? '')}</span>
         <span class="task-clock" id="taskClock">${formatClock()}</span>
       </div>
@@ -120,18 +147,32 @@ function renderDesktop(): void {
     if (!node) continue
     const active = w.z === maxZ ? '' : ' inactive'
     const maxed = w.maximized ? ' maximized' : ''
+    const viewId = node.kind === 'folder' ? w.viewId || node.id : node.id
+    const viewNode = getNode(state, viewId) || node
+    const crumbs =
+      node.kind === 'folder'
+        ? folderPath(state, viewId)
+            .map(
+              (p, i, arr) =>
+                `<button type="button" class="crumb" data-win-nav="${w.id}" data-folder="${p.id}">${escapeHtml(p.name)}</button>${i < arr.length - 1 ? '<span class="crumb-sep">/</span>' : ''}`,
+            )
+            .join('')
+        : ''
     const body =
       node.kind === 'folder'
-        ? `<div class="window-body"><div class="folder-surface" data-surface="${node.id}"></div></div>`
+        ? `<div class="explorer-bar"><button type="button" class="explorer-up" data-win-up="${w.id}" title="Up">^</button><div class="explorer-path">${crumbs}</div></div>
+           <div class="window-body"><div class="folder-surface" data-surface="${viewId}" data-explorer="${w.id}"></div></div>`
         : node.kind === 'game'
           ? `<div class="window-body game-body"><div class="game-host" data-game-host="${w.id}" data-game="${node.game ?? ''}"></div></div>`
-          : `<div class="window-body file-body"><textarea class="file-editor" data-file="${node.id}">${escapeHtml(node.content)}</textarea></div>`
+          : node.kind === 'app'
+            ? `<div class="window-body app-body"><div class="app-host" data-app-host="${w.id}" data-app="${node.app ?? ''}"></div></div>`
+            : `<div class="window-body file-body"><textarea class="file-editor" data-file="${node.id}">${escapeHtml(node.content)}</textarea></div>`
     layer.insertAdjacentHTML(
       'beforeend',
       `<div class="window${active}${maxed}" data-win="${w.id}" style="left:${w.x}px;top:${w.y}px;width:${w.w}px;height:${w.h}px;z-index:${w.z}">
         <div class="title-bar" data-move="${w.id}">
           <button type="button" class="win-btn" data-sys="${w.id}">-</button>
-          <div class="title-text">${escapeHtml(node.name)}</div>
+          <div class="title-text">${escapeHtml(viewNode.name)}</div>
           <button type="button" class="win-btn" data-min="${w.id}">_</button>
           <button type="button" class="win-btn" data-max="${w.id}">[]</button>
           <button type="button" class="win-btn" data-close="${w.id}">x</button>
@@ -145,9 +186,12 @@ function renderDesktop(): void {
     if (w.minimized) continue
     const node = getNode(state, w.nodeId)
     if (!node || node.kind !== 'folder') continue
-    const folderSurface = app.querySelector(`[data-surface="${node.id}"]`) as HTMLElement | null
+    const viewId = w.viewId || node.id
+    const folderSurface = app.querySelector(
+      `.folder-surface[data-explorer="${w.id}"]`,
+    ) as HTMLElement | null
     if (!folderSurface) continue
-    for (const child of childrenOf(state, node.id)) {
+    for (const child of childrenOf(state, viewId)) {
       folderSurface.insertAdjacentHTML(
         'beforeend',
         deskIconHtml(
@@ -166,6 +210,134 @@ function renderDesktop(): void {
   if (renamingId) startRename(renamingId)
   bindDesktop()
   mountGameWindows(wins, maxZ)
+  mountAppWindows(wins, maxZ)
+}
+
+function showScenarioDialog(title: string, text: string): void {
+  const existing = document.getElementById('scenarioDialog')
+  existing?.remove()
+  const dlg = document.createElement('div')
+  dlg.id = 'scenarioDialog'
+  dlg.className = 'scenario-dialog'
+  dlg.innerHTML = `<div class="scenario-dialog-inner">
+    <div class="title-bar"><div class="title-text">${escapeHtml(title)}</div>
+      <button type="button" class="win-btn" id="scenarioDlgClose">x</button></div>
+    <div class="scenario-dialog-body">${escapeHtml(text)}</div>
+    <div class="scenario-dialog-hint">${escapeHtml(currentHint(scenarioPack, scenario))}</div>
+  </div>`
+  document.body.appendChild(dlg)
+  dlg.querySelector('#scenarioDlgClose')?.addEventListener('mousedown', (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dlg.remove()
+  })
+}
+
+function handleLiveEvents(events: LiveEvent[]): void {
+  if (!events.length) return
+  applyLiveEvents(state, events, {
+    showDialog: showScenarioDialog,
+    openBrowser: (url) => {
+      pendingBrowserUrl = url || 'mail.markos'
+      ensureBrowserIcon()
+    },
+  })
+  renderDesktop()
+  if (pendingBrowserUrl) {
+    const url = pendingBrowserUrl
+    pendingBrowserUrl = null
+    openBrowserApp(url)
+  }
+}
+
+function ensureBrowserIcon(): void {
+  if (state.nodes.some((n) => n.kind === 'app' && n.app === 'browser')) return
+  state.nodes.push({
+    id: `browser-${Date.now().toString(36)}`,
+    parentId: null,
+    kind: 'app',
+    name: 'browser',
+    badge: 'www',
+    content: 'app:browser',
+    app: 'browser',
+    x: 520,
+    y: 40,
+  })
+  saveState(state)
+}
+
+function openBrowserApp(url?: string): void {
+  ensureBrowserIcon()
+  const node = state.nodes.find((n) => n.kind === 'app' && n.app === 'browser')
+  if (!node) return
+  pendingBrowserUrl = url || 'mail.markos'
+  openWindow(state, node.id)
+  renderDesktop()
+}
+
+async function ensureLiveLink(): Promise<boolean> {
+  if (liveSend && authToken) return true
+  const guest = await guestAuth()
+  if (!guest) return false
+  authToken = guest.token
+  const conn = connectLive(guest.token, handleLiveEvents)
+  liveSend = conn.sendActivity
+  return true
+}
+
+async function onNetworkConnect(networkId: string): Promise<void> {
+  document.querySelector('.net-window')?.remove()
+  const alive = await probeServerAlive()
+  if (!alive) {
+    handleLiveEvents(scenarioPack.events.onServerDown || [])
+    renderDesktop()
+    return
+  }
+
+  const wasOffline = !scenario.online
+  const result = applyActivity(scenarioPack, scenario, {
+    type: 'network.connected',
+    networkId,
+  })
+  scenario = result.progress
+
+  if (wasOffline) {
+    await ensureLiveLink()
+    let events = result.events
+    if (authToken) {
+      const remote = await postActivity(authToken, { type: 'network.connected', networkId })
+      if (remote.length) events = remote
+    }
+    handleLiveEvents(events)
+  } else {
+    renderDesktop()
+  }
+}
+
+function onEmailCreated(user: string, domain: string): void {
+  const email = `${user}@${domain}`
+  const result = applyActivity(scenarioPack, scenario, {
+    type: 'email.created',
+    email,
+  })
+  scenario = result.progress
+  void (async () => {
+    let events = result.events
+    if (authToken) {
+      const remote = await postActivity(authToken, { type: 'email.created', email })
+      if (remote.length) events = remote
+    }
+    handleLiveEvents(events)
+  })()
+}
+
+function openNetworkPanel(): void {
+  document.querySelector('.net-window')?.remove()
+  const layer = app.querySelector('.windows-layer') || app
+  const win = openNetworkWindow(scenarioPack, scenario.online, scenario.networkId, (net) => {
+    void onNetworkConnect(net.id)
+  })
+  layer.appendChild(win)
 }
 
 function mountGameWindows(
@@ -184,6 +356,27 @@ function mountGameWindows(
       const canvas = host.querySelector('canvas') as HTMLCanvasElement | null
       canvas?.focus()
     }
+  }
+}
+
+function mountAppWindows(
+  wins: { id: string; minimized: boolean; z: number; nodeId: string }[],
+  maxZ: number,
+): void {
+  for (const w of wins) {
+    if (w.minimized) continue
+    const node = getNode(state, w.nodeId)
+    if (!node || node.kind !== 'app' || node.app !== 'browser') continue
+    const host = app.querySelector(`[data-app-host="${w.id}"]`) as HTMLElement | null
+    if (!host) continue
+    const startUrl = pendingBrowserUrl || 'mail.markos'
+    pendingBrowserUrl = null
+    const handle = mountBrowser(host, {
+      startUrl,
+      onCreateEmail: ({ user, domain }) => onEmailCreated(user, domain),
+    })
+    browserHandles.set(w.id, handle)
+    if (w.z === maxZ) host.focus()
   }
 }
 
@@ -250,6 +443,13 @@ function bindDesktop(): void {
     el.addEventListener('mousedown', (e) => onIconDown(e as MouseEvent, id, el as HTMLElement))
     el.addEventListener('dblclick', (e) => {
       e.stopPropagation()
+      const explorer = (el as HTMLElement).closest('[data-explorer]') as HTMLElement | null
+      const n = getNode(state, id)
+      if (n?.kind === 'folder' && explorer?.dataset.explorer) {
+        navigateExplorer(state, explorer.dataset.explorer, id)
+        renderDesktop()
+        return
+      }
       openNode(id)
     })
     el.addEventListener('contextmenu', (e) => {
@@ -341,6 +541,37 @@ function bindDesktop(): void {
     toggleStartMenu()
   })
 
+  document.getElementById('netTray')?.addEventListener('mousedown', (e) => {
+    e.stopPropagation()
+    openNetworkPanel()
+  })
+
+  app.querySelectorAll('[data-win-nav]').forEach((el) => {
+    el.addEventListener('mousedown', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const winId = (el as HTMLElement).dataset.winNav!
+      const folderId = (el as HTMLElement).dataset.folder!
+      navigateExplorer(state, winId, folderId)
+      renderDesktop()
+    })
+  })
+  app.querySelectorAll('[data-win-up]').forEach((el) => {
+    el.addEventListener('mousedown', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const winId = (el as HTMLElement).dataset.winUp!
+      const w = state.windows.find((x) => x.id === winId)
+      if (!w) return
+      const viewId = w.viewId || w.nodeId
+      const cur = getNode(state, viewId)
+      if (cur?.parentId) {
+        navigateExplorer(state, winId, cur.parentId)
+        renderDesktop()
+      }
+    })
+  })
+
   app.querySelectorAll('.task-btn').forEach((el) => {
     el.addEventListener('click', () => {
       const winId = (el as HTMLElement).dataset.win!
@@ -369,6 +600,17 @@ function refreshSelection(): void {
 function openNode(id: string): void {
   const n = getNode(state, id)
   if (!n) return
+  if (n.kind === 'folder') {
+    const existing = state.windows.find((w) => {
+      const root = getNode(state, w.nodeId)
+      return root?.kind === 'folder' && !w.minimized
+    })
+    if (existing) {
+      navigateExplorer(state, existing.id, id)
+      renderDesktop()
+      return
+    }
+  }
   openWindow(state, id)
   renderDesktop()
 }

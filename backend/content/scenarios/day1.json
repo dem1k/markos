@@ -1,0 +1,115 @@
+{
+  "id": "day1",
+  "title": "Day 1 — Get online",
+  "startNodeId": "offline_start",
+  "networks": [
+    { "id": "markos-home", "ssid": "markOS-Home", "secure": true, "signal": 4 },
+    { "id": "cafe-free", "ssid": "Cafe-Free", "secure": false, "signal": 2 },
+    { "id": "neighbor-5g", "ssid": "Neighbor-5G", "secure": true, "signal": 1 }
+  ],
+  "nodes": [
+    {
+      "id": "offline_start",
+      "title": "Disconnected",
+      "ageBands": ["kid", "teen", "adult"],
+      "payload": {
+        "hint": "Your computer is offline. Open Network (OFF) and connect. Real internet needs the markOS server."
+      },
+      "vectorDelta": {}
+    },
+    {
+      "id": "online_waiting_task",
+      "title": "Online — first task",
+      "ageBands": ["kid", "teen", "adult"],
+      "payload": {
+        "hint": "Server is alive. Open Browser and create your email at mail.markos."
+      },
+      "vectorDelta": { "programming": 1 }
+    },
+    {
+      "id": "email_created",
+      "title": "Email ready",
+      "ageBands": ["kid", "teen", "adult"],
+      "payload": {
+        "hint": "You have an email account. More tasks will arrive later."
+      },
+      "vectorDelta": { "programming": 2, "communication": 1 }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_online",
+      "from": "offline_start",
+      "to": "online_waiting_task",
+      "choiceLabel": "Go online",
+      "when": { "activity": "network.connected" }
+    },
+    {
+      "id": "e_email",
+      "from": "online_waiting_task",
+      "to": "email_created",
+      "choiceLabel": "Create email",
+      "when": { "activity": "email.created" }
+    }
+  ],
+  "events": {
+    "onOnline": [
+      {
+        "type": "dialog",
+        "payload": {
+          "title": "Connected",
+          "text": "Wi-Fi linked to markOS network.\nServer is alive — first task incoming."
+        }
+      },
+      {
+        "type": "task",
+        "payload": {
+          "id": "task-create-email",
+          "title": "Create email",
+          "text": "Open Browser and go to mail.markos. Create your first email account."
+        }
+      },
+      {
+        "type": "open_app",
+        "payload": { "app": "browser", "url": "mail.markos" }
+      },
+      {
+        "type": "desktop_file",
+        "payload": {
+          "name": "browser",
+          "badge": "www",
+          "content": "app:browser",
+          "kind": "app",
+          "app": "browser"
+        }
+      }
+    ],
+    "onEmailCreated": [
+      {
+        "type": "dialog",
+        "payload": {
+          "title": "Email created",
+          "text": "Nice! Your mailbox is ready. Check for new messages soon."
+        }
+      },
+      {
+        "type": "mail",
+        "payload": {
+          "id": "mail-welcome",
+          "from": "mentor@markos.local",
+          "subject": "Welcome to markOS mail",
+          "body": "Your account works.\n\nThis is how people talk on the internet — carefully.\n\n— Mentor"
+        }
+      }
+    ],
+    "onServerDown": [
+      {
+        "type": "dialog",
+        "payload": {
+          "title": "No signal",
+          "text": "Could not reach markOS server.\nStart the backend, then try Wi-Fi again."
+        }
+      }
+    ]
+  }
+}
